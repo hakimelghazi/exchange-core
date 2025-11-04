@@ -1,6 +1,8 @@
 package engine
 
-import "container/list"
+import (
+	"container/list"
+)
 
 // priceLevel holds FIFO orders for one price.
 type priceLevel struct {
