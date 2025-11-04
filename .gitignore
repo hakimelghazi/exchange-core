@@ -1,0 +1,22 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# IntelliJ, VS Code etc.
+.idea/
+.vscode/
+
+# Dependency directories (alternatively, use go mod vendor)
+vendor/
+
+# OS generated files
+.DS_Store
