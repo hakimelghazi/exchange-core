@@ -1,3 +1,3 @@
-module github.com/yourname/exchange-core
+module github.com/hakimelghazi/exchange-core
 
 go 1.22
