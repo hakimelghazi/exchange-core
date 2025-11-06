@@ -1,6 +1,6 @@
 # exchange-core
 
-Minimal matching engine prototype written in Go. The goal of this project is to explore how centralized exchanges manage order flow (placing, matching, resting) and to provide a solid code sample to discuss with recruiters.
+Minimal matching engine prototype written in Go. The goal of this project is to explore how centralized exchanges manage order flow (placing, matching, resting) and to provide a solid code.
 
 ## Project layout
 
