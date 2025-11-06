@@ -65,8 +65,9 @@ func (m *Matcher) matchBuy(o *Order) (*MatchResult, error) {
 		// if maker is filled, pop it
 		if maker.Remaining == 0 {
 			bestAsk.orders.Remove(front)
+			m.book.removeOrderID(maker.ID)
 		}
-		// if price level emptuy, remove it
+		// if price level empty, remove it
 		if bestAsk.orders.Len() == 0 {
 			m.book.removeAskLevel(bestAsk.price)
 		}
@@ -121,6 +122,7 @@ func (m *Matcher) matchSell(o *Order) (*MatchResult, error) {
 
 		if maker.Remaining == 0 {
 			bestBid.orders.Remove(front)
+			m.book.removeOrderID(maker.ID)
 		}
 
 		if bestBid.orders.Len() == 0 {

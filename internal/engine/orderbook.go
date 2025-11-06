@@ -150,3 +150,7 @@ func (ob *OrderBook) removeAskLevel(price int64) {
 		}
 	}
 }
+
+func (ob *OrderBook) removeOrderID(id string) {
+	delete(ob.ordersByID, id)
+}
