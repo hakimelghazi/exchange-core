@@ -25,3 +25,32 @@ func TestFullFill(t *testing.T) {
 	}
 
 }
+
+func TestPartialFill(t *testing.T) {
+	ob := NewOrderBook()
+	m := NewMatcher(ob)
+	o1 := newTestOrder("o1", SideBuy, 105, 2)
+	ob.AddOrder(o1)
+
+	o2 := newTestOrder("o2", SideSell, 104, 1)
+
+	m.Submit(o2)
+
+	ref1, ok1 := ob.ordersByID["o1"]
+
+	if !ok1 {
+		t.Fatalf("order 1 was removed")
+	}
+
+	// check here
+	if ref1.side != SideBuy || ref1.price != 105 || ref1.elem.Value.(*Order).Remaining != 1 {
+		t.Fatalf("order 1 was modified")
+	}
+
+	_, ok2 := ob.ordersByID["o2"]
+
+	if ok2 {
+		t.Fatalf("order 2 was not properly removed after being filled")
+	}
+
+}
