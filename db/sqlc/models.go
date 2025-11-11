@@ -15,6 +15,21 @@ type Account struct {
 	Balance pgtype.Numeric
 }
 
+type Ledger struct {
+	ID        pgtype.UUID
+	RefType   string
+	RefID     pgtype.UUID
+	CreatedAt pgtype.Timestamptz
+}
+
+type LedgerEntry struct {
+	ID        pgtype.UUID
+	LedgerID  pgtype.UUID
+	AccountID pgtype.UUID
+	Amount    pgtype.Numeric
+	CreatedAt pgtype.Timestamptz
+}
+
 type Order struct {
 	ID        pgtype.UUID
 	UserID    pgtype.UUID

@@ -56,3 +56,41 @@ func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order
 	)
 	return i, err
 }
+
+const getOrder = `-- name: GetOrder :one
+SELECT id, user_id, market, side, price, quantity, remaining, status, created_at FROM orders WHERE id = $1
+`
+
+func (q *Queries) GetOrder(ctx context.Context, id pgtype.UUID) (Order, error) {
+	row := q.db.QueryRow(ctx, getOrder, id)
+	var i Order
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Market,
+		&i.Side,
+		&i.Price,
+		&i.Quantity,
+		&i.Remaining,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const updateOrderStatus = `-- name: UpdateOrderStatus :exec
+UPDATE orders
+SET status = $2, remaining = $3
+WHERE id = $1
+`
+
+type UpdateOrderStatusParams struct {
+	ID        pgtype.UUID
+	Status    string
+	Remaining pgtype.Numeric
+}
+
+func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusParams) error {
+	_, err := q.db.Exec(ctx, updateOrderStatus, arg.ID, arg.Status, arg.Remaining)
+	return err
+}

@@ -47,3 +47,36 @@ func (q *Queries) InsertTrade(ctx context.Context, arg InsertTradeParams) (Trade
 	)
 	return i, err
 }
+
+const listTradesByOrder = `-- name: ListTradesByOrder :many
+SELECT id, taker_order_id, maker_order_id, price, quantity, traded_at FROM trades
+WHERE taker_order_id = $1 OR maker_order_id = $1
+ORDER BY traded_at DESC
+`
+
+func (q *Queries) ListTradesByOrder(ctx context.Context, takerOrderID pgtype.UUID) ([]Trade, error) {
+	rows, err := q.db.Query(ctx, listTradesByOrder, takerOrderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Trade
+	for rows.Next() {
+		var i Trade
+		if err := rows.Scan(
+			&i.ID,
+			&i.TakerOrderID,
+			&i.MakerOrderID,
+			&i.Price,
+			&i.Quantity,
+			&i.TradedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
