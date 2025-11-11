@@ -23,7 +23,7 @@ func main() {
 	queries := dbsqlc.New(pool)
 
 	// 3) build engine with queries
-	eng := engine.NewEngine(1024, queries) // you’ll tweak the ctor to accept queries
+	eng := engine.NewEngine(1024, pool, queries) // you’ll tweak the ctor to accept queries
 
 	// 4) start engine loop (and http later)
 	go eng.Run(ctx)

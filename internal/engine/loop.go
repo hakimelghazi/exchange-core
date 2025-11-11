@@ -1,9 +1,15 @@
+// internal/engine/loop.go
 package engine
 
 import (
 	"context"
+	"log"
+	"math/big"
 
+	"github.com/google/uuid"
 	dbsqlc "github.com/hakimelghazi/exchange-core/db/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Engine struct {
@@ -11,34 +17,61 @@ type Engine struct {
 	matcher *Matcher
 	cmds    chan Command
 	done    chan struct{}
-	queries *dbsqlc.Queries
+
+	pool    *pgxpool.Pool
+	queries *dbsqlc.Queries // sqlc-generated queries
 }
 
-// NewEngine creates the loop. buffer lets you tune backpressure.
-func NewEngine(buffer int, queries *dbsqlc.Queries) *Engine {
+func NewEngine(buffer int, pool *pgxpool.Pool, queries *dbsqlc.Queries) *Engine {
 	book := NewOrderBook()
 	return &Engine{
 		book:    book,
 		matcher: NewMatcher(book),
 		cmds:    make(chan Command, buffer),
 		done:    make(chan struct{}),
-		queries: queries, // store it
+		pool:    pool,
+		queries: queries,
 	}
 }
 
-// Run processes commands until ctx is canceled or Stop() is called.
 func (e *Engine) Run(ctx context.Context) {
 	defer close(e.done)
+
 	for {
 		select {
 		case cmd := <-e.cmds:
 			switch cmd.Type {
+
 			case CmdPlace:
+				// 1) match in memory
 				res, err := e.matcher.Submit(cmd.Order)
+
+				// 2) persist trades (if any) in one DB tx
+				if err == nil && len(res.Trades) > 0 && e.pool != nil && e.queries != nil {
+					tx, txErr := e.pool.Begin(ctx)
+					if txErr != nil {
+						// if we can't write trades, log & return the match result anyway
+						log.Printf("begin tx failed: %v", txErr)
+					} else {
+						qtx := e.queries.WithTx(tx) // sqlc pattern :contentReference[oaicite:2]{index=2}
+						persistErr := e.persistTrades(ctx, qtx, res.Trades)
+						if persistErr != nil {
+							_ = tx.Rollback(ctx)
+							log.Printf("persist trades failed: %v", persistErr)
+						} else {
+							if err := tx.Commit(ctx); err != nil {
+								log.Printf("commit failed: %v", err)
+							}
+						}
+					}
+				}
+
+				// 3) answer the caller
 				cmd.Resp <- struct {
 					Result *MatchResult
 					Err    error
 				}{res, err}
+
 			case CmdCancel:
 				ok := e.book.CancelOrder(cmd.ID)
 				cmd.Resp <- struct {
@@ -46,50 +79,76 @@ func (e *Engine) Run(ctx context.Context) {
 					Err error
 				}{ok, nil}
 			}
+
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (e *Engine) Stop() { close(e.cmds); <-e.done }
+// persistTrades inserts each trade with sqlc
+func (e *Engine) persistTrades(
+	ctx context.Context,
+	q *dbsqlc.Queries,
+	trades []Trade,
+) error {
+	for _, tr := range trades {
+		tradeID, err := newUUID()
+		if err != nil {
+			return err
+		}
+		takerID, err := uuidFromString(tr.TakerOrderID)
+		if err != nil {
+			return err
+		}
+		makerID, err := uuidFromString(tr.MakerOrderID)
+		if err != nil {
+			return err
+		}
 
-// ----- Client helpers (type-safe wrappers) -----
+		priceNumeric := numericFromInt64(tr.Price)
+		qtyNumeric := numericFromInt64(tr.Quantity)
 
-func (e *Engine) Place(ctx context.Context, o *Order) (*MatchResult, error) {
-	resp := make(chan any, 1)
-	select {
-	case e.cmds <- Command{Type: CmdPlace, Order: o, Resp: resp}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	select {
-	case v := <-resp:
-		r := v.(struct {
-			Result *MatchResult
-			Err    error
+		// you’ll have whatever args your InsertTrade query expects
+		_, err = q.InsertTrade(ctx, dbsqlc.InsertTradeParams{
+			ID:           tradeID,
+			TakerOrderID: takerID,
+			MakerOrderID: makerID,
+			Price:        priceNumeric,
+			Quantity:     qtyNumeric,
 		})
-		return r.Result, r.Err
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (e *Engine) Cancel(ctx context.Context, id string) (bool, error) {
-	resp := make(chan any, 1)
-	select {
-	case e.cmds <- Command{Type: CmdCancel, ID: id, Resp: resp}:
-	case <-ctx.Done():
-		return false, ctx.Err()
+func newUUID() (pgtype.UUID, error) {
+	uid, err := uuid.NewRandom()
+	if err != nil {
+		return pgtype.UUID{}, err
 	}
-	select {
-	case v := <-resp:
-		r := v.(struct {
-			OK  bool
-			Err error
-		})
-		return r.OK, r.Err
-	case <-ctx.Done():
-		return false, ctx.Err()
+	var out pgtype.UUID
+	out.Valid = true
+	out.Bytes = uid
+	return out, nil
+}
+
+func uuidFromString(id string) (pgtype.UUID, error) {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	var out pgtype.UUID
+	out.Valid = true
+	out.Bytes = parsed
+	return out, nil
+}
+
+func numericFromInt64(v int64) pgtype.Numeric {
+	return pgtype.Numeric{
+		Int:   big.NewInt(v),
+		Valid: true,
 	}
 }
