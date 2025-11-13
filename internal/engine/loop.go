@@ -1,8 +1,8 @@
-// internal/engine/loop.go
 package engine
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/big"
 
@@ -67,17 +67,11 @@ func (e *Engine) Run(ctx context.Context) {
 				}
 
 				// 3) answer the caller
-				cmd.Resp <- struct {
-					Result *MatchResult
-					Err    error
-				}{res, err}
+				cmd.Resp <- placeResult{Result: res, Err: err}
 
 			case CmdCancel:
 				ok := e.book.CancelOrder(cmd.ID)
-				cmd.Resp <- struct {
-					OK  bool
-					Err error
-				}{ok, nil}
+				cmd.Resp <- cancelResult{OK: ok, Err: nil}
 			}
 
 		case <-ctx.Done():
@@ -86,7 +80,56 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-// persistTrades inserts each trade with sqlc
+func (e *Engine) Place(ctx context.Context, o *Order) (*MatchResult, error) {
+	if o == nil {
+		return nil, errors.New("nil order")
+	}
+	resp := make(chan any, 1)
+	cmd := Command{Type: CmdPlace, Order: o, Resp: resp}
+
+	if err := e.enqueueCommand(ctx, cmd); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case raw := <-resp:
+		out := raw.(placeResult)
+		return out.Result, out.Err
+	}
+}
+
+func (e *Engine) Cancel(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, errors.New("empty order id")
+	}
+	resp := make(chan any, 1)
+	cmd := Command{Type: CmdCancel, ID: id, Resp: resp}
+
+	if err := e.enqueueCommand(ctx, cmd); err != nil {
+		return false, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case raw := <-resp:
+		out := raw.(cancelResult)
+		return out.OK, out.Err
+	}
+}
+
+func (e *Engine) enqueueCommand(ctx context.Context, cmd Command) error {
+	select {
+	case e.cmds <- cmd:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// insert each trade with sqlc
 func (e *Engine) persistTrades(
 	ctx context.Context,
 	q *dbsqlc.Queries,

@@ -14,3 +14,13 @@ type Command struct {
 	ID    string   // used when Type == CmdCancel
 	Resp  chan any // engine sends the result back here
 }
+
+type placeResult struct {
+	Result *MatchResult
+	Err    error
+}
+
+type cancelResult struct {
+	OK  bool
+	Err error
+}

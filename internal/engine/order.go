@@ -1,6 +1,10 @@
 package engine
 
-import "time"
+import (
+	"errors"
+	"strings"
+	"time"
+)
 
 type Side string
 
@@ -21,4 +25,17 @@ type Order struct {
 	Remaining int64 // unfilled
 	IsMarket  bool
 	CreatedAt time.Time
+}
+
+var ErrInvalidSide = errors.New("invalid order side")
+
+func ParseSide(s string) (Side, error) {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case string(SideBuy):
+		return SideBuy, nil
+	case string(SideSell):
+		return SideSell, nil
+	default:
+		return "", ErrInvalidSide
+	}
 }
