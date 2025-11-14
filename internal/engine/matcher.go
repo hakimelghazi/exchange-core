@@ -74,6 +74,7 @@ func (m *Matcher) matchBuy(o *Order) (*MatchResult, error) {
 	}
 
 	if remaining == 0 {
+		o.Remaining = 0
 		res.OrderFilled = true
 		return res, nil
 	}
@@ -131,6 +132,7 @@ func (m *Matcher) matchSell(o *Order) (*MatchResult, error) {
 	}
 
 	if remaining == 0 {
+		o.Remaining = 0
 		res.OrderFilled = true
 		return res, nil
 	}

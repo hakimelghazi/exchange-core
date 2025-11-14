@@ -3,7 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
 	"math/big"
 
 	"github.com/google/uuid"
@@ -43,31 +43,7 @@ func (e *Engine) Run(ctx context.Context) {
 			switch cmd.Type {
 
 			case CmdPlace:
-				// 1) match in memory
-				res, err := e.matcher.Submit(cmd.Order)
-
-				// 2) persist trades (if any) in one DB tx
-				if err == nil && len(res.Trades) > 0 && e.pool != nil && e.queries != nil {
-					tx, txErr := e.pool.Begin(ctx)
-					if txErr != nil {
-						// if we can't write trades, log & return the match result anyway
-						log.Printf("begin tx failed: %v", txErr)
-					} else {
-						qtx := e.queries.WithTx(tx) // sqlc pattern :contentReference[oaicite:2]{index=2}
-						persistErr := e.persistTrades(ctx, qtx, res.Trades)
-						if persistErr != nil {
-							_ = tx.Rollback(ctx)
-							log.Printf("persist trades failed: %v", persistErr)
-						} else {
-							if err := tx.Commit(ctx); err != nil {
-								log.Printf("commit failed: %v", err)
-							}
-						}
-					}
-				}
-
-				// 3) answer the caller
-				cmd.Resp <- placeResult{Result: res, Err: err}
+				e.handlePlace(ctx, cmd)
 
 			case CmdCancel:
 				ok := e.book.CancelOrder(cmd.ID)
@@ -194,4 +170,154 @@ func numericFromInt64(v int64) pgtype.Numeric {
 		Int:   big.NewInt(v),
 		Valid: true,
 	}
+}
+
+func numericToInt64(v pgtype.Numeric) int64 {
+	if !v.Valid || v.Int == nil {
+		return 0
+	}
+	result := new(big.Int).Set(v.Int)
+	if v.Exp < 0 {
+		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-v.Exp)), nil)
+		result.Quo(result, divisor)
+	} else if v.Exp > 0 {
+		multiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(v.Exp)), nil)
+		result.Mul(result, multiplier)
+	}
+	return result.Int64()
+}
+
+func statusFromAmounts(remaining, original int64) string {
+	switch {
+	case remaining <= 0:
+		return "FILLED"
+	case remaining < original:
+		return "PARTIAL"
+	default:
+		return "OPEN"
+	}
+}
+
+func (e *Engine) updateMatchedOrders(
+	ctx context.Context,
+	q *dbsqlc.Queries,
+	taker *Order,
+	trades []Trade,
+) error {
+	filled := make(map[string]int64)
+	for _, tr := range trades {
+		filled[tr.TakerOrderID] += tr.Quantity
+		filled[tr.MakerOrderID] += tr.Quantity
+	}
+
+	for orderID := range filled {
+		orderUUID, err := uuidFromString(orderID)
+		if err != nil {
+			return fmt.Errorf("invalid order id %s: %w", orderID, err)
+		}
+
+		var originalQty, newRemaining int64
+		if orderID == taker.ID {
+			originalQty = taker.Quantity
+			newRemaining = taker.Remaining
+		} else {
+			row, err := q.GetOrderForUpdate(ctx, orderUUID)
+			if err != nil {
+				return err
+			}
+
+			currentRemaining := numericToInt64(row.Remaining)
+			newRemaining = currentRemaining - filled[orderID]
+			if newRemaining < 0 {
+				newRemaining = 0
+			}
+			originalQty = numericToInt64(row.Quantity)
+		}
+
+		status := statusFromAmounts(newRemaining, originalQty)
+		if err := q.UpdateOrderAfterMatch(ctx, dbsqlc.UpdateOrderAfterMatchParams{
+			ID:        orderUUID,
+			Remaining: numericFromInt64(newRemaining),
+			Status:    status,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func orderStatusFromOrder(o *Order) string {
+	return statusFromAmounts(o.Remaining, o.Quantity)
+}
+
+func (e *Engine) handlePlace(ctx context.Context, cmd Command) {
+	res, err := e.matcher.Submit(cmd.Order)
+	if err != nil {
+		cmd.Resp <- placeResult{Result: res, Err: err}
+		return
+	}
+
+	if e.pool == nil || e.queries == nil {
+		cmd.Resp <- placeResult{Result: res, Err: nil}
+		return
+	}
+
+	tx, txErr := e.pool.Begin(ctx)
+	if txErr != nil {
+		cmd.Resp <- placeResult{Result: res, Err: txErr}
+		return
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	qtx := e.queries.WithTx(tx)
+
+	orderUUID, err := uuidFromString(cmd.Order.ID)
+	if err != nil {
+		cmd.Resp <- placeResult{Result: res, Err: fmt.Errorf("invalid order id: %w", err)}
+		return
+	}
+	userUUID, err := uuidFromString(cmd.Order.UserID)
+	if err != nil {
+		cmd.Resp <- placeResult{Result: res, Err: fmt.Errorf("invalid user id: %w", err)}
+		return
+	}
+
+	_, err = qtx.UpsertOrder(ctx, dbsqlc.UpsertOrderParams{
+		ID:        orderUUID,
+		UserID:    userUUID,
+		Market:    cmd.Order.Market,
+		Side:      string(cmd.Order.Side),
+		Price:     numericFromInt64(cmd.Order.Price),
+		Quantity:  numericFromInt64(cmd.Order.Quantity),
+		Remaining: numericFromInt64(cmd.Order.Remaining),
+		Status:    orderStatusFromOrder(cmd.Order),
+	})
+	if err != nil {
+		cmd.Resp <- placeResult{Result: res, Err: err}
+		return
+	}
+
+	if len(res.Trades) > 0 {
+		if err := e.persistTrades(ctx, qtx, res.Trades); err != nil {
+			cmd.Resp <- placeResult{Result: res, Err: err}
+			return
+		}
+		if err := e.updateMatchedOrders(ctx, qtx, cmd.Order, res.Trades); err != nil {
+			cmd.Resp <- placeResult{Result: res, Err: err}
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		cmd.Resp <- placeResult{Result: res, Err: err}
+		return
+	}
+	tx = nil
+
+	cmd.Resp <- placeResult{Result: res, Err: nil}
 }

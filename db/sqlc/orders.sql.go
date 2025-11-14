@@ -11,16 +11,81 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const createOrder = `-- name: CreateOrder :one
+const getOrder = `-- name: GetOrder :one
+SELECT id, user_id, market, side, price, quantity, remaining, status, created_at FROM orders WHERE id = $1
+`
+
+func (q *Queries) GetOrder(ctx context.Context, id pgtype.UUID) (Order, error) {
+	row := q.db.QueryRow(ctx, getOrder, id)
+	var i Order
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Market,
+		&i.Side,
+		&i.Price,
+		&i.Quantity,
+		&i.Remaining,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getOrderForUpdate = `-- name: GetOrderForUpdate :one
+SELECT id, user_id, market, side, price, quantity, remaining, status, created_at FROM orders
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetOrderForUpdate(ctx context.Context, id pgtype.UUID) (Order, error) {
+	row := q.db.QueryRow(ctx, getOrderForUpdate, id)
+	var i Order
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Market,
+		&i.Side,
+		&i.Price,
+		&i.Quantity,
+		&i.Remaining,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const updateOrderAfterMatch = `-- name: UpdateOrderAfterMatch :exec
+UPDATE orders
+SET remaining = $2,
+    status = $3
+WHERE id = $1
+`
+
+type UpdateOrderAfterMatchParams struct {
+	ID        pgtype.UUID
+	Remaining pgtype.Numeric
+	Status    string
+}
+
+func (q *Queries) UpdateOrderAfterMatch(ctx context.Context, arg UpdateOrderAfterMatchParams) error {
+	_, err := q.db.Exec(ctx, updateOrderAfterMatch, arg.ID, arg.Remaining, arg.Status)
+	return err
+}
+
+const upsertOrder = `-- name: UpsertOrder :one
 INSERT INTO orders (
     id, user_id, market, side, price, quantity, remaining, status
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8
 )
+ON CONFLICT (id) DO UPDATE
+SET remaining = EXCLUDED.remaining,
+    status    = EXCLUDED.status
 RETURNING id, user_id, market, side, price, quantity, remaining, status, created_at
 `
 
-type CreateOrderParams struct {
+type UpsertOrderParams struct {
 	ID        pgtype.UUID
 	UserID    pgtype.UUID
 	Market    string
@@ -31,8 +96,8 @@ type CreateOrderParams struct {
 	Status    string
 }
 
-func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order, error) {
-	row := q.db.QueryRow(ctx, createOrder,
+func (q *Queries) UpsertOrder(ctx context.Context, arg UpsertOrderParams) (Order, error) {
+	row := q.db.QueryRow(ctx, upsertOrder,
 		arg.ID,
 		arg.UserID,
 		arg.Market,
@@ -55,42 +120,4 @@ func (q *Queries) CreateOrder(ctx context.Context, arg CreateOrderParams) (Order
 		&i.CreatedAt,
 	)
 	return i, err
-}
-
-const getOrder = `-- name: GetOrder :one
-SELECT id, user_id, market, side, price, quantity, remaining, status, created_at FROM orders WHERE id = $1
-`
-
-func (q *Queries) GetOrder(ctx context.Context, id pgtype.UUID) (Order, error) {
-	row := q.db.QueryRow(ctx, getOrder, id)
-	var i Order
-	err := row.Scan(
-		&i.ID,
-		&i.UserID,
-		&i.Market,
-		&i.Side,
-		&i.Price,
-		&i.Quantity,
-		&i.Remaining,
-		&i.Status,
-		&i.CreatedAt,
-	)
-	return i, err
-}
-
-const updateOrderStatus = `-- name: UpdateOrderStatus :exec
-UPDATE orders
-SET status = $2, remaining = $3
-WHERE id = $1
-`
-
-type UpdateOrderStatusParams struct {
-	ID        pgtype.UUID
-	Status    string
-	Remaining pgtype.Numeric
-}
-
-func (q *Queries) UpdateOrderStatus(ctx context.Context, arg UpdateOrderStatusParams) error {
-	_, err := q.db.Exec(ctx, updateOrderStatus, arg.ID, arg.Status, arg.Remaining)
-	return err
 }
