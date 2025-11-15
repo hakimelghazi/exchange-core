@@ -46,7 +46,7 @@ func (e *Engine) Run(ctx context.Context) {
 				e.handlePlace(ctx, cmd)
 
 			case CmdCancel:
-				ok := e.book.CancelOrder(cmd.ID)
+				ok := e.handleCancel(ctx, cmd.ID)
 				cmd.Resp <- cancelResult{OK: ok, Err: nil}
 			}
 
@@ -249,6 +249,33 @@ func (e *Engine) updateMatchedOrders(
 
 func orderStatusFromOrder(o *Order) string {
 	return statusFromAmounts(o.Remaining, o.Quantity)
+}
+
+func (e *Engine) handleCancel(ctx context.Context, id string) bool {
+	removed := e.book.CancelOrder(id)
+
+	dbOK := false
+	if e.pool != nil && e.queries != nil {
+		if orderUUID, err := uuidFromString(id); err == nil {
+			tx, err := e.pool.Begin(ctx)
+			if err == nil {
+				defer func() {
+					if tx != nil {
+						_ = tx.Rollback(ctx)
+					}
+				}()
+				qtx := e.queries.WithTx(tx)
+				if err := qtx.MarkOrderCancelled(ctx, orderUUID); err == nil {
+					if err := tx.Commit(ctx); err == nil {
+						dbOK = true
+						tx = nil
+					}
+				}
+			}
+		}
+	}
+
+	return removed || dbOK
 }
 
 func (e *Engine) handlePlace(ctx context.Context, cmd Command) {

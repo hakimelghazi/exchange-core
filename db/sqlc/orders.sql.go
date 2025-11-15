@@ -55,6 +55,18 @@ func (q *Queries) GetOrderForUpdate(ctx context.Context, id pgtype.UUID) (Order,
 	return i, err
 }
 
+const markOrderCancelled = `-- name: MarkOrderCancelled :exec
+UPDATE orders
+SET status = 'CANCELLED'
+WHERE id = $1
+  AND status IN ('OPEN','PARTIAL')
+`
+
+func (q *Queries) MarkOrderCancelled(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, markOrderCancelled, id)
+	return err
+}
+
 const updateOrderAfterMatch = `-- name: UpdateOrderAfterMatch :exec
 UPDATE orders
 SET remaining = $2,

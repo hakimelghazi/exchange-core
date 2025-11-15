@@ -22,3 +22,9 @@ UPDATE orders
 SET remaining = $2,
     status = $3
 WHERE id = $1;
+
+-- name: MarkOrderCancelled :exec
+UPDATE orders
+SET status = 'CANCELLED'
+WHERE id = $1
+  AND status IN ('OPEN','PARTIAL');
