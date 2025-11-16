@@ -42,7 +42,10 @@ func main() {
 	queries := dbsqlc.New(pool)
 
 	// 2) engine
-	eng := engine.NewEngine(1024, pool, queries)
+	eng, err := engine.NewEngine(1024, pool, queries)
+	if err != nil {
+		log.Fatal(err)
+	}
 	go eng.Run(ctx)
 
 	// 3) router

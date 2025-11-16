@@ -59,6 +59,28 @@ func (q *Queries) GetAccount(ctx context.Context, id pgtype.UUID) (Account, erro
 	return i, err
 }
 
+const getAccountByUserAsset = `-- name: GetAccountByUserAsset :one
+SELECT id, user_id, asset, balance FROM accounts
+WHERE user_id = $1 AND asset = $2
+`
+
+type GetAccountByUserAssetParams struct {
+	UserID pgtype.UUID
+	Asset  string
+}
+
+func (q *Queries) GetAccountByUserAsset(ctx context.Context, arg GetAccountByUserAssetParams) (Account, error) {
+	row := q.db.QueryRow(ctx, getAccountByUserAsset, arg.UserID, arg.Asset)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Asset,
+		&i.Balance,
+	)
+	return i, err
+}
+
 const listAccountsByUser = `-- name: ListAccountsByUser :many
 SELECT id, user_id, asset, balance FROM accounts WHERE user_id = $1 ORDER BY asset
 `
@@ -102,6 +124,37 @@ type UpdateAccountBalanceParams struct {
 
 func (q *Queries) UpdateAccountBalance(ctx context.Context, arg UpdateAccountBalanceParams) (Account, error) {
 	row := q.db.QueryRow(ctx, updateAccountBalance, arg.ID, arg.Balance)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Asset,
+		&i.Balance,
+	)
+	return i, err
+}
+
+const upsertAccount = `-- name: UpsertAccount :one
+INSERT INTO accounts (id, user_id, asset, balance)  -- balance can remain 0; ledger is source of truth
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (user_id, asset) DO NOTHING
+RETURNING id, user_id, asset, balance
+`
+
+type UpsertAccountParams struct {
+	ID      pgtype.UUID
+	UserID  pgtype.UUID
+	Asset   string
+	Balance pgtype.Numeric
+}
+
+func (q *Queries) UpsertAccount(ctx context.Context, arg UpsertAccountParams) (Account, error) {
+	row := q.db.QueryRow(ctx, upsertAccount,
+		arg.ID,
+		arg.UserID,
+		arg.Asset,
+		arg.Balance,
+	)
 	var i Account
 	err := row.Scan(
 		&i.ID,

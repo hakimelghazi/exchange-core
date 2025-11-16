@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 
 	"github.com/google/uuid"
 	dbsqlc "github.com/hakimelghazi/exchange-core/db/sqlc"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,7 +24,10 @@ type Engine struct {
 	queries *dbsqlc.Queries // sqlc-generated queries
 }
 
-func NewEngine(buffer int, pool *pgxpool.Pool, queries *dbsqlc.Queries) *Engine {
+func NewEngine(buffer int, pool *pgxpool.Pool, queries *dbsqlc.Queries) (*Engine, error) {
+	if pool == nil || queries == nil {
+		return nil, errors.New("engine requires a persistent database connection")
+	}
 	book := NewOrderBook()
 	return &Engine{
 		book:    book,
@@ -31,7 +36,7 @@ func NewEngine(buffer int, pool *pgxpool.Pool, queries *dbsqlc.Queries) *Engine 
 		done:    make(chan struct{}),
 		pool:    pool,
 		queries: queries,
-	}
+	}, nil
 }
 
 func (e *Engine) Run(ctx context.Context) {
@@ -46,8 +51,8 @@ func (e *Engine) Run(ctx context.Context) {
 				e.handlePlace(ctx, cmd)
 
 			case CmdCancel:
-				ok := e.handleCancel(ctx, cmd.ID)
-				cmd.Resp <- cancelResult{OK: ok, Err: nil}
+				ok, err := e.handleCancel(ctx, cmd.ID)
+				cmd.Resp <- cancelResult{OK: ok, Err: err}
 			}
 
 		case <-ctx.Done():
@@ -105,17 +110,14 @@ func (e *Engine) enqueueCommand(ctx context.Context, cmd Command) error {
 	}
 }
 
-// insert each trade with sqlc
-func (e *Engine) persistTrades(
+// Persist both trades and their ledger postings in a single transaction.
+func (e *Engine) persistTradesAndLedger(
 	ctx context.Context,
 	q *dbsqlc.Queries,
 	trades []Trade,
 ) error {
 	for _, tr := range trades {
-		tradeID, err := newUUID()
-		if err != nil {
-			return err
-		}
+		tradeID := mustNewUUID()
 		takerID, err := uuidFromString(tr.TakerOrderID)
 		if err != nil {
 			return err
@@ -125,18 +127,94 @@ func (e *Engine) persistTrades(
 			return err
 		}
 
-		priceNumeric := numericFromInt64(tr.Price)
-		qtyNumeric := numericFromInt64(tr.Quantity)
-
-		// you’ll have whatever args your InsertTrade query expects
-		_, err = q.InsertTrade(ctx, dbsqlc.InsertTradeParams{
+		if _, err := q.InsertTrade(ctx, dbsqlc.InsertTradeParams{
 			ID:           tradeID,
 			TakerOrderID: takerID,
 			MakerOrderID: makerID,
-			Price:        priceNumeric,
-			Quantity:     qtyNumeric,
-		})
+			Price:        numericFromInt64(tr.Price),
+			Quantity:     numericFromInt64(tr.Quantity),
+		}); err != nil {
+			return err
+		}
+
+		ledgerID := mustNewUUID()
+		if _, err := q.CreateLedger(ctx, dbsqlc.CreateLedgerParams{
+			ID:      ledgerID,
+			RefType: "trade",
+			RefID:   tradeID,
+		}); err != nil {
+			return err
+		}
+
+		takerRow, err := q.GetOrderForUpdate(ctx, takerID)
 		if err != nil {
+			return err
+		}
+		makerRow, err := q.GetOrderForUpdate(ctx, makerID)
+		if err != nil {
+			return err
+		}
+
+		notional := new(big.Int).Mul(big.NewInt(tr.Price), big.NewInt(tr.Quantity))
+		amtUSD := pgtype.Numeric{Int: notional, Valid: true}
+		amtBTC := numericFromInt64(tr.Quantity)
+
+		var buyerUser, sellerUser uuid.UUID
+		if takerRow.Side == "BUY" {
+			buyerUser = uuid.UUID(takerRow.UserID.Bytes)
+			sellerUser = uuid.UUID(makerRow.UserID.Bytes)
+		} else {
+			buyerUser = uuid.UUID(makerRow.UserID.Bytes)
+			sellerUser = uuid.UUID(takerRow.UserID.Bytes)
+		}
+
+		buyerUSD, err := e.getOrCreateAccountID(ctx, q, buyerUser, "USD")
+		if err != nil {
+			return err
+		}
+		buyerBTC, err := e.getOrCreateAccountID(ctx, q, buyerUser, "BTC")
+		if err != nil {
+			return err
+		}
+		sellerUSD, err := e.getOrCreateAccountID(ctx, q, sellerUser, "USD")
+		if err != nil {
+			return err
+		}
+		sellerBTC, err := e.getOrCreateAccountID(ctx, q, sellerUser, "BTC")
+		if err != nil {
+			return err
+		}
+
+		if err := q.InsertLedgerEntry(ctx, dbsqlc.InsertLedgerEntryParams{
+			ID:        mustNewUUID(),
+			LedgerID:  ledgerID,
+			AccountID: buyerUSD,
+			Amount:    negate(amtUSD),
+		}); err != nil {
+			return err
+		}
+		if err := q.InsertLedgerEntry(ctx, dbsqlc.InsertLedgerEntryParams{
+			ID:        mustNewUUID(),
+			LedgerID:  ledgerID,
+			AccountID: buyerBTC,
+			Amount:    amtBTC,
+		}); err != nil {
+			return err
+		}
+		if err := q.InsertLedgerEntry(ctx, dbsqlc.InsertLedgerEntryParams{
+			ID:        mustNewUUID(),
+			LedgerID:  ledgerID,
+			AccountID: sellerBTC,
+			Amount:    negate(amtBTC),
+		}); err != nil {
+			return err
+		}
+		if err := q.InsertLedgerEntry(ctx, dbsqlc.InsertLedgerEntryParams{
+			ID:        mustNewUUID(),
+			LedgerID:  ledgerID,
+			AccountID: sellerUSD,
+			Amount:    amtUSD,
+		}); err != nil {
 			return err
 		}
 	}
@@ -251,49 +329,74 @@ func orderStatusFromOrder(o *Order) string {
 	return statusFromAmounts(o.Remaining, o.Quantity)
 }
 
-func (e *Engine) handleCancel(ctx context.Context, id string) bool {
-	removed := e.book.CancelOrder(id)
-
-	dbOK := false
-	if e.pool != nil && e.queries != nil {
-		if orderUUID, err := uuidFromString(id); err == nil {
-			tx, err := e.pool.Begin(ctx)
-			if err == nil {
-				defer func() {
-					if tx != nil {
-						_ = tx.Rollback(ctx)
-					}
-				}()
-				qtx := e.queries.WithTx(tx)
-				if err := qtx.MarkOrderCancelled(ctx, orderUUID); err == nil {
-					if err := tx.Commit(ctx); err == nil {
-						dbOK = true
-						tx = nil
-					}
-				}
-			}
-		}
-	}
-
-	return removed || dbOK
+func mustNewUUID() pgtype.UUID {
+	uid, _ := newUUID()
+	return uid
 }
 
-func (e *Engine) handlePlace(ctx context.Context, cmd Command) {
-	res, err := e.matcher.Submit(cmd.Order)
+func pgUUIDFrom(u uuid.UUID) pgtype.UUID {
+	return pgtype.UUID{
+		Bytes: u,
+		Valid: true,
+	}
+}
+
+func (e *Engine) getOrCreateAccountID(
+	ctx context.Context,
+	q *dbsqlc.Queries,
+	user uuid.UUID,
+	asset string,
+) (pgtype.UUID, error) {
+	uid := pgUUIDFrom(user)
+	acc, err := q.GetAccountByUserAsset(ctx, dbsqlc.GetAccountByUserAssetParams{
+		UserID: uid,
+		Asset:  asset,
+	})
+	if err == nil && acc.ID.Valid {
+		return acc.ID, nil
+	}
+
+	id := mustNewUUID()
+	zero := numericFromInt64(0)
+	if _, err := q.UpsertAccount(ctx, dbsqlc.UpsertAccountParams{
+		ID:      id,
+		UserID:  uid,
+		Asset:   asset,
+		Balance: zero,
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return pgtype.UUID{}, err
+	}
+
+	acc2, err := q.GetAccountByUserAsset(ctx, dbsqlc.GetAccountByUserAssetParams{
+		UserID: uid,
+		Asset:  asset,
+	})
 	if err != nil {
-		cmd.Resp <- placeResult{Result: res, Err: err}
-		return
+		return pgtype.UUID{}, err
+	}
+	return acc2.ID, nil
+}
+
+func negate(n pgtype.Numeric) pgtype.Numeric {
+	if n.Int == nil {
+		return n
+	}
+	cp := new(big.Int).Set(n.Int)
+	cp.Neg(cp)
+	return pgtype.Numeric{Int: cp, Valid: n.Valid, Exp: n.Exp}
+}
+
+func (e *Engine) handleCancel(ctx context.Context, id string) (bool, error) {
+	orderUUID, err := uuidFromString(id)
+	if err != nil {
+		log.Printf("handleCancel: invalid order id %s: %v", id, err)
+		return false, err
 	}
 
-	if e.pool == nil || e.queries == nil {
-		cmd.Resp <- placeResult{Result: res, Err: nil}
-		return
-	}
-
-	tx, txErr := e.pool.Begin(ctx)
-	if txErr != nil {
-		cmd.Resp <- placeResult{Result: res, Err: txErr}
-		return
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		log.Printf("handleCancel: begin tx failed for %s: %v", id, err)
+		return false, err
 	}
 	defer func() {
 		if tx != nil {
@@ -302,14 +405,53 @@ func (e *Engine) handlePlace(ctx context.Context, cmd Command) {
 	}()
 
 	qtx := e.queries.WithTx(tx)
+	if err := qtx.MarkOrderCancelled(ctx, orderUUID); err != nil {
+		log.Printf("handleCancel: mark cancelled failed for %s: %v", id, err)
+		return false, err
+	}
+
+	e.book.CancelOrder(id)
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("handleCancel: commit failed for %s: %v", id, err)
+		return false, err
+	}
+	tx = nil
+
+	return true, nil
+}
+
+func (e *Engine) handlePlace(ctx context.Context, cmd Command) {
+	tx, txErr := e.pool.Begin(ctx)
+	if txErr != nil {
+		log.Printf("handlePlace: begin tx failed for order %s: %v", cmd.Order.ID, txErr)
+		cmd.Resp <- placeResult{Result: nil, Err: txErr}
+		return
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	res, err := e.matcher.Submit(cmd.Order)
+	if err != nil {
+		log.Printf("handlePlace: matcher failed for order %s: %v", cmd.Order.ID, err)
+		cmd.Resp <- placeResult{Result: res, Err: err}
+		return
+	}
+
+	qtx := e.queries.WithTx(tx)
 
 	orderUUID, err := uuidFromString(cmd.Order.ID)
 	if err != nil {
+		log.Printf("handlePlace: invalid order id %s: %v", cmd.Order.ID, err)
 		cmd.Resp <- placeResult{Result: res, Err: fmt.Errorf("invalid order id: %w", err)}
 		return
 	}
 	userUUID, err := uuidFromString(cmd.Order.UserID)
 	if err != nil {
+		log.Printf("handlePlace: invalid user id %s: %v", cmd.Order.UserID, err)
 		cmd.Resp <- placeResult{Result: res, Err: fmt.Errorf("invalid user id: %w", err)}
 		return
 	}
@@ -325,22 +467,26 @@ func (e *Engine) handlePlace(ctx context.Context, cmd Command) {
 		Status:    orderStatusFromOrder(cmd.Order),
 	})
 	if err != nil {
+		log.Printf("handlePlace: upsert failed for order %s: %v", cmd.Order.ID, err)
 		cmd.Resp <- placeResult{Result: res, Err: err}
 		return
 	}
 
 	if len(res.Trades) > 0 {
-		if err := e.persistTrades(ctx, qtx, res.Trades); err != nil {
+		if err := e.persistTradesAndLedger(ctx, qtx, res.Trades); err != nil {
+			log.Printf("handlePlace: persistTradesAndLedger failed for order %s: %v", cmd.Order.ID, err)
 			cmd.Resp <- placeResult{Result: res, Err: err}
 			return
 		}
 		if err := e.updateMatchedOrders(ctx, qtx, cmd.Order, res.Trades); err != nil {
+			log.Printf("handlePlace: updateMatchedOrders failed for order %s: %v", cmd.Order.ID, err)
 			cmd.Resp <- placeResult{Result: res, Err: err}
 			return
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		log.Printf("handlePlace: commit failed for order %s: %v", cmd.Order.ID, err)
 		cmd.Resp <- placeResult{Result: res, Err: err}
 		return
 	}
