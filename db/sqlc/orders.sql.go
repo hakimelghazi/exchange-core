@@ -55,6 +55,159 @@ func (q *Queries) GetOrderForUpdate(ctx context.Context, id pgtype.UUID) (Order,
 	return i, err
 }
 
+const listOrders = `-- name: ListOrders :many
+SELECT id, user_id, market, side, price, quantity, remaining, status, created_at
+FROM orders
+WHERE (
+        $1::uuid IS NULL
+        OR user_id = $1
+      )
+  AND (
+        COALESCE($2, '') = ''
+        OR status = $2
+      )
+  AND (
+        COALESCE($3, '') = ''
+        OR side = $3
+      )
+  AND (
+        $4::timestamptz IS NULL
+        OR (created_at, id) > (
+              $4::timestamptz,
+              COALESCE($5::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+          )
+      )
+ORDER BY created_at, id
+LIMIT $6
+`
+
+type ListOrdersParams struct {
+	Column1 pgtype.UUID
+	Column2 interface{}
+	Column3 interface{}
+	Column4 pgtype.Timestamptz
+	Column5 pgtype.UUID
+	Limit   int32
+}
+
+func (q *Queries) ListOrders(ctx context.Context, arg ListOrdersParams) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listOrders,
+		arg.Column1,
+		arg.Column2,
+		arg.Column3,
+		arg.Column4,
+		arg.Column5,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Order
+	for rows.Next() {
+		var i Order
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Market,
+			&i.Side,
+			&i.Price,
+			&i.Quantity,
+			&i.Remaining,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRestingAsks = `-- name: ListRestingAsks :many
+
+
+SELECT id, user_id, market, side, price, quantity, remaining, status, created_at
+FROM orders
+WHERE status IN ('OPEN','PARTIAL')
+  AND side = 'SELL'
+  AND ($1::text IS NULL OR market = $1)
+ORDER BY price ASC, created_at ASC, id ASC
+`
+
+// Keyset pagination with (created_at, id)
+func (q *Queries) ListRestingAsks(ctx context.Context, dollar_1 string) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listRestingAsks, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Order
+	for rows.Next() {
+		var i Order
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Market,
+			&i.Side,
+			&i.Price,
+			&i.Quantity,
+			&i.Remaining,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRestingBids = `-- name: ListRestingBids :many
+SELECT id, user_id, market, side, price, quantity, remaining, status, created_at
+FROM orders
+WHERE status IN ('OPEN','PARTIAL')
+  AND side = 'BUY'
+  AND ($1::text IS NULL OR market = $1)
+ORDER BY price DESC, created_at ASC, id ASC
+`
+
+func (q *Queries) ListRestingBids(ctx context.Context, dollar_1 string) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listRestingBids, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Order
+	for rows.Next() {
+		var i Order
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Market,
+			&i.Side,
+			&i.Price,
+			&i.Quantity,
+			&i.Remaining,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markOrderCancelled = `-- name: MarkOrderCancelled :exec
 UPDATE orders
 SET status = 'CANCELLED'

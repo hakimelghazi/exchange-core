@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: Exchange Core API
+  version: 0.1.0
+servers: [{ url: http://localhost:8080 }]
+paths:
+  /orders:
+    post:
+      summary: Place an order
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          schema: { type: string }
+          required: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderRequest' }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderResponse' }
+        "422": { description: Validation error }
+    get:
+      summary: List orders
+      parameters:
+        - in: query
+          name: user_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: status
+          schema: { type: string, enum: [OPEN, PARTIAL, FILLED, CANCELLED] }
+        - in: query
+          name: side
+          schema: { type: string, enum: [BUY, SELL] }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, minimum: 1, maximum: 500 }
+        - in: query
+          name: cursor
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paged orders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+                  next_cursor: { type: string, nullable: true }
+  /orders/{id}:
+    get:
+      summary: Get order by ID
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        "404": { description: Not found }
+  /trades:
+    get:
+      summary: List trades
+      parameters:
+        - in: query
+          name: user_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: order_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: market
+          schema: { type: string, example: BTC-USD }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: Trades
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Trade' }
+  /balances:
+    get:
+      summary: Get balances for a user (ledger-derived)
+      parameters:
+        - in: query
+          name: user_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Balances
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Balance' }
+
+components:
+  schemas:
+    OrderRequest:
+      type: object
+      required: [id, user_id, market, side, quantity]
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        market: { type: string, example: BTC-USD }
+        side: { type: string, enum: [BUY, SELL] }
+        price: { type: integer, nullable: true, description: "ignored for market orders" }
+        quantity: { type: integer, minimum: 1 }
+        is_market: { type: boolean, default: false }
+    OrderResponse:
+      type: object
+      properties:
+        order_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        market: { type: string }
+        side: { type: string }
+        quantity: { type: integer }
+        filled: { type: boolean }
+        remaining: { type: integer }
+        resting: { type: boolean }
+        trades:
+          type: array
+          items: { $ref: '#/components/schemas/Trade' }
+        request_id: { type: string }
+        received_at: { type: string, format: date-time }
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        market: { type: string }
+        side: { type: string }
+        price: { type: integer }
+        quantity: { type: integer }
+        remaining: { type: integer }
+        status: { type: string, enum: [OPEN, PARTIAL, FILLED, CANCELLED] }
+        created_at: { type: string, format: date-time }
+    Trade:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        taker_order_id: { type: string, format: uuid }
+        maker_order_id: { type: string, format: uuid }
+        price: { type: integer }
+        quantity: { type: integer }
+        traded_at: { type: string, format: date-time }
+    Balance:
+      type: object
+      properties:
+        asset: { type: string }
+        balance: { type: string, description: "decimal string" }

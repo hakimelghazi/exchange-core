@@ -42,3 +42,19 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 	err := row.Scan(&i.ID, &i.Email)
 	return i, err
 }
+
+const upsertUser = `-- name: UpsertUser :exec
+INSERT INTO users (id, email)
+VALUES ($1, $2)
+ON CONFLICT (id) DO NOTHING
+`
+
+type UpsertUserParams struct {
+	ID    pgtype.UUID
+	Email pgtype.Text
+}
+
+func (q *Queries) UpsertUser(ctx context.Context, arg UpsertUserParams) error {
+	_, err := q.db.Exec(ctx, upsertUser, arg.ID, arg.Email)
+	return err
+}

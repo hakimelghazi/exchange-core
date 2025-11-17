@@ -48,6 +48,60 @@ func (q *Queries) InsertTrade(ctx context.Context, arg InsertTradeParams) (Trade
 	return i, err
 }
 
+const listTrades = `-- name: ListTrades :many
+SELECT t.id, t.taker_order_id, t.maker_order_id, t.price, t.quantity, t.traded_at
+FROM trades t
+JOIN orders ot ON ot.id = t.taker_order_id
+JOIN orders om ON om.id = t.maker_order_id
+WHERE ($1::uuid IS NULL OR ot.user_id = $1 OR om.user_id = $1)
+  AND ($2::uuid IS NULL OR t.taker_order_id = $2 OR t.maker_order_id = $2)
+  AND ($3::text = '' OR ot.market = $3 OR om.market = $3)
+  AND ($4::timestamptz IS NULL OR t.traded_at >= $4)
+ORDER BY t.traded_at DESC
+LIMIT $5
+`
+
+type ListTradesParams struct {
+	Column1 pgtype.UUID
+	Column2 pgtype.UUID
+	Column3 string
+	Column4 pgtype.Timestamptz
+	Limit   int32
+}
+
+func (q *Queries) ListTrades(ctx context.Context, arg ListTradesParams) ([]Trade, error) {
+	rows, err := q.db.Query(ctx, listTrades,
+		arg.Column1,
+		arg.Column2,
+		arg.Column3,
+		arg.Column4,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Trade
+	for rows.Next() {
+		var i Trade
+		if err := rows.Scan(
+			&i.ID,
+			&i.TakerOrderID,
+			&i.MakerOrderID,
+			&i.Price,
+			&i.Quantity,
+			&i.TradedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTradesByOrder = `-- name: ListTradesByOrder :many
 SELECT id, taker_order_id, maker_order_id, price, quantity, traded_at FROM trades
 WHERE taker_order_id = $1 OR maker_order_id = $1

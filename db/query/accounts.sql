@@ -26,3 +26,12 @@ INSERT INTO accounts (id, user_id, asset, balance)  -- balance can remain 0; led
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (user_id, asset) DO NOTHING
 RETURNING *;
+
+-- name: GetBalancesByUser :many
+SELECT a.asset,
+       COALESCE(SUM(le.amount), 0)::NUMERIC(20,8) AS balance
+FROM accounts a
+LEFT JOIN ledger_entries le ON le.account_id = a.id
+WHERE a.user_id = $1
+GROUP BY a.asset
+ORDER BY a.asset;

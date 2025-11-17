@@ -81,6 +81,41 @@ func (q *Queries) GetAccountByUserAsset(ctx context.Context, arg GetAccountByUse
 	return i, err
 }
 
+const getBalancesByUser = `-- name: GetBalancesByUser :many
+SELECT a.asset,
+       COALESCE(SUM(le.amount), 0)::NUMERIC(20,8) AS balance
+FROM accounts a
+LEFT JOIN ledger_entries le ON le.account_id = a.id
+WHERE a.user_id = $1
+GROUP BY a.asset
+ORDER BY a.asset
+`
+
+type GetBalancesByUserRow struct {
+	Asset   string
+	Balance pgtype.Numeric
+}
+
+func (q *Queries) GetBalancesByUser(ctx context.Context, userID pgtype.UUID) ([]GetBalancesByUserRow, error) {
+	rows, err := q.db.Query(ctx, getBalancesByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetBalancesByUserRow
+	for rows.Next() {
+		var i GetBalancesByUserRow
+		if err := rows.Scan(&i.Asset, &i.Balance); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAccountsByUser = `-- name: ListAccountsByUser :many
 SELECT id, user_id, asset, balance FROM accounts WHERE user_id = $1 ORDER BY asset
 `
