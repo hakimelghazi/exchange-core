@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strings"
 
 	"github.com/google/uuid"
 	dbsqlc "github.com/hakimelghazi/exchange-core/db/sqlc"
@@ -419,6 +420,57 @@ func (e *Engine) handleCancel(ctx context.Context, id string) (bool, error) {
 	tx = nil
 
 	return true, nil
+}
+
+// Bootstrap reloads resting orders from the database into the in-memory book.
+func (e *Engine) Bootstrap(ctx context.Context, market *string) error {
+	if e.queries == nil {
+		return fmt.Errorf("bootstrap: queries is nil")
+	}
+
+	var marketParam string
+	if market != nil {
+		marketParam = strings.TrimSpace(*market)
+	}
+
+	asks, err := e.queries.ListRestingAsks(ctx, marketParam)
+	if err != nil {
+		return fmt.Errorf("bootstrap asks: %w", err)
+	}
+	for _, r := range asks {
+		o := &Order{
+			ID:        uuid.UUID(r.ID.Bytes).String(),
+			UserID:    uuid.UUID(r.UserID.Bytes).String(),
+			Market:    r.Market,
+			Side:      SideSell,
+			Price:     numericToInt64(r.Price),
+			Quantity:  numericToInt64(r.Quantity),
+			Remaining: numericToInt64(r.Remaining),
+			IsMarket:  false,
+		}
+		e.book.AddOrder(o)
+	}
+
+	bids, err := e.queries.ListRestingBids(ctx, marketParam)
+	if err != nil {
+		return fmt.Errorf("bootstrap bids: %w", err)
+	}
+	for _, r := range bids {
+		o := &Order{
+			ID:        uuid.UUID(r.ID.Bytes).String(),
+			UserID:    uuid.UUID(r.UserID.Bytes).String(),
+			Market:    r.Market,
+			Side:      SideBuy,
+			Price:     numericToInt64(r.Price),
+			Quantity:  numericToInt64(r.Quantity),
+			Remaining: numericToInt64(r.Remaining),
+			IsMarket:  false,
+		}
+		e.book.AddOrder(o)
+	}
+
+	log.Printf("bootstrap loaded %d asks, %d bids into book", len(asks), len(bids))
+	return nil
 }
 
 func (e *Engine) handlePlace(ctx context.Context, cmd Command) {

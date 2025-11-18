@@ -96,6 +96,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if err := eng.Bootstrap(ctx, nil); err != nil {
+		log.Fatal(err)
+	}
 	go eng.Run(ctx)
 
 	// 3) router

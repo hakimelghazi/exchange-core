@@ -134,7 +134,11 @@ SELECT id, user_id, market, side, price, quantity, remaining, status, created_at
 FROM orders
 WHERE status IN ('OPEN','PARTIAL')
   AND side = 'SELL'
-  AND ($1::text IS NULL OR market = $1)
+  AND (
+        $1::text IS NULL
+        OR $1 = ''
+        OR market = $1
+      )
 ORDER BY price ASC, created_at ASC, id ASC
 `
 
@@ -174,7 +178,11 @@ SELECT id, user_id, market, side, price, quantity, remaining, status, created_at
 FROM orders
 WHERE status IN ('OPEN','PARTIAL')
   AND side = 'BUY'
-  AND ($1::text IS NULL OR market = $1)
+  AND (
+        $1::text IS NULL
+        OR $1 = ''
+        OR market = $1
+      )
 ORDER BY price DESC, created_at ASC, id ASC
 `
 
