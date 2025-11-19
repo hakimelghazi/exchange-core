@@ -26,6 +26,7 @@ import (
 	exdb "github.com/hakimelghazi/exchange-core/db"
 	dbsqlc "github.com/hakimelghazi/exchange-core/db/sqlc"
 	"github.com/hakimelghazi/exchange-core/internal/engine"
+	pricefeed "github.com/hakimelghazi/exchange-core/pricefeed"
 )
 
 var (
@@ -65,8 +66,9 @@ func init() {
 }
 
 type Server struct {
-	engine  *engine.Engine
-	queries *dbsqlc.Queries
+	engine     *engine.Engine
+	queries    *dbsqlc.Queries
+	priceCache *pricefeed.PriceCache
 }
 
 type placeOrderRequest struct {
@@ -112,10 +114,16 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(3 * time.Second))
 
+	priceCache := pricefeed.NewPriceCache()
 	server := &Server{
-		engine:  eng,
-		queries: queries,
+		engine:     eng,
+		queries:    queries,
+		priceCache: priceCache,
 	}
+
+	feed := pricefeed.NewCoinGeckoFeed()
+	markets := []string{"BTC-USD", "ETH-USD"}
+	go pricefeed.StartPriceUpdater(ctx, feed, priceCache, markets, 20*time.Second)
 
 	// Read endpoints
 	r.Get("/orders/{id}", server.handleGetOrderByID)
@@ -125,6 +133,7 @@ func main() {
 	r.Get("/openapi.yaml", server.handleOpenAPIYAML)
 	r.Get("/openapi.json", server.handleOpenAPIJSON)
 	r.Get("/docs", server.handleDocs)
+	r.Get("/ticker", server.handleTicker)
 
 	// POST /orders
 	r.Post("/orders", func(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +437,26 @@ func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, http.StatusOK, rows)
+}
+
+func (s *Server) handleTicker(w http.ResponseWriter, r *http.Request) {
+	market := strings.TrimSpace(r.URL.Query().Get("market"))
+	if market == "" {
+		market = "BTC-USD"
+	}
+
+	price, ok := s.priceCache.Get(market)
+	if !ok {
+		writeProblem(w, r, http.StatusServiceUnavailable, "price_unavailable", "no recent price for this market")
+		return
+	}
+
+	resp := map[string]any{
+		"market":     market,
+		"price":      price,
+		"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	writeJSON(w, r, http.StatusOK, resp)
 }
 
 func (s *Server) handleOpenAPIYAML(w http.ResponseWriter, r *http.Request) {
